@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/gorilla/mux"
 	"github.com/netrebel/kafka-with-go/protos"
+	"github.com/riferrei/srclient"
 	proto "google.golang.org/protobuf/proto"
 )
 
@@ -60,10 +62,44 @@ func PushMessageToTopic(topic string, message []byte) error {
 		return err
 	}
 	defer p.Close()
+
+	// 2) Fetch the latest version of the schema, or create a new one if it is the first
+	schemaRegistryClient := srclient.CreateSchemaRegistryClient("http://localhost:31081")
+	schema, err := schemaRegistryClient.GetLatestSchema("life360_account_deleted-value_v1")
+	if err != nil {
+		panic(err)
+	}
+	if schema == nil {
+		fmt.Println("Schema not found creating it")
+		schemaBytes, err := ioutil.ReadFile("life360_account_deleted_v1.proto")
+		if err != nil {
+			panic(fmt.Sprintf("File not found %s", err))
+		}
+
+		schema, err = schemaRegistryClient.CreateSchema(topic, string(schemaBytes), srclient.Protobuf)
+		if err != nil {
+			panic(fmt.Sprintf("Error creating the schema %s", err))
+		}
+	}
+	schemaIDBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(schemaIDBytes, uint32(schema.ID()))
+
+	// 3) Serialize the record using the schema provided by the client,
+	// making sure to include the schema id as part of the record.
+	// newComplexType := ComplexType{ID: 1, Name: "Gopher"}
+	// value, _ := json.Marshal(newComplexType)
+	// native, _, _ := schema.Codec().NativeFromTextual(value)
+	// valueBytes, _ := schema.Codec().BinaryFromNative(nil, native)
+
+	var recordValue []byte
+	recordValue = append(recordValue, byte(0))
+	recordValue = append(recordValue, schemaIDBytes...)
+	recordValue = append(recordValue, message...)
+
 	delivery_chan := make(chan kafka.Event, 10000)
 	err = p.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-		Value:          message},
+		Value:          recordValue},
 		delivery_chan,
 	)
 	if err != nil {
